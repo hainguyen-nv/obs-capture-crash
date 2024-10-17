@@ -69,9 +69,11 @@ void main()
 // =============================================================================
 // Globals
 // =============================================================================
-static uint32_t gWindowWidth  = 1280;
-static uint32_t gWindowHeight = 720;
-static bool     gEnableDebug  = true;
+static uint32_t    gWindowWidth                = 1280;
+static uint32_t    gWindowHeight               = 720;
+static bool        gEnableDebug                = false;
+static bool        gPresentFromMultipleThreads = true;
+static GLFWwindow* gWindow                     = nullptr;
 
 void CreatePipelineLayout(VulkanRenderer* pRenderer, VkPipelineLayout* pLayout);
 void CreateShaderModules(
@@ -85,6 +87,23 @@ void CreateGeometryBuffers(
     VulkanBuffer*   ppIndexBuffer,
     VulkanBuffer*   ppPositionBuffer,
     VulkanBuffer*   ppVertexColorBuffer);
+
+// =============================================================================
+// Window events
+// =============================================================================
+static const char* GetDecoratedWindowTitle(bool mt)
+{
+    return mt ? "101_color_cube_vulkan: Multi-Thread Present" : "101_color_cube_vulkan: Single-Thread Present";
+}
+
+void KeyDownEvent(int key)
+{
+    if (key == GLFW_KEY_T)
+    {
+        gPresentFromMultipleThreads = !gPresentFromMultipleThreads;
+        glfwSetWindowTitle(gWindow, GetDecoratedWindowTitle(gPresentFromMultipleThreads));
+    }
+}
 
 // =============================================================================
 // main()
@@ -190,12 +209,15 @@ int main(int argc, char** argv)
     // *************************************************************************
     // Window
     // *************************************************************************
-    auto window = GrexWindow::Create(gWindowWidth, gWindowHeight, GREX_BASE_FILE_NAME());
+    auto window = GrexWindow::Create(gWindowWidth, gWindowHeight, GetDecoratedWindowTitle(gPresentFromMultipleThreads));
     if (!window)
     {
         assert(false && "GrexWindow::Create failed");
         return EXIT_FAILURE;
     }
+
+    gWindow = window->GetWindow();
+    window->AddKeyDownCallbacks(KeyDownEvent);
 
     // *************************************************************************
     // Swapchain
@@ -287,7 +309,7 @@ int main(int argc, char** argv)
     bool                terminate  = false;
     uint32_t            imageIndex = 0;
     std::atomic_int32_t presentId  = -1;
-   
+
     // Thread function
     auto ThreadFn = [&renderer, &terminate, &imageIndex, &presentId](int32_t id) {
         int32_t myId = id;
@@ -310,15 +332,16 @@ int main(int argc, char** argv)
                 break;
             }
 
-            GREX_LOG_INFO("Presented from: " << myId);
+            //GREX_LOG_INFO("Presented from: " << myId);
 
             presentId = -1;
         }
     };
-   
+
     // Create kNumPresentThreads to handle presentation when kicked off from main thread
     std::vector<std::unique_ptr<std::thread>> presentThreads;
-    for (uint32_t i = 0; i < kNumPresentThreads; ++i) {
+    for (uint32_t i = 0; i < kNumPresentThreads; ++i)
+    {
         auto thread = std::unique_ptr<std::thread>(new std::thread(ThreadFn, i));
         presentThreads.push_back(std::move(thread));
     }
@@ -335,7 +358,8 @@ int main(int argc, char** argv)
     while (window->PollEvents())
     {
         // Wait for SwapchainPresent to be called
-        while (presentId != -1);
+        while (presentId != -1)
+            ;
 
         if (AcquireNextImage(renderer.get(), &imageIndex))
         {
@@ -416,11 +440,24 @@ int main(int argc, char** argv)
         }
 
         // Kick of presentation
-        presentId = static_cast<int32_t>(rand() % kNumPresentThreads);
+        if (gPresentFromMultipleThreads)
+        {
+            presentId = static_cast<int32_t>(rand() % kNumPresentThreads);
+        }
+        else
+        {
+            presentId = -1;
+            if (!SwapchainPresent(renderer.get(), imageIndex))
+            {
+                assert(false && "SwapchainPresent failed");
+                break;
+            }
+        }
     }
 
     terminate = true;
-    for (auto& thread : presentThreads) {
+    for (auto& thread : presentThreads)
+    {
         thread->join();
     }
 
