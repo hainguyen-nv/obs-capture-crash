@@ -10,6 +10,10 @@
 #include <glm/gtx/transform.hpp>
 using namespace glm;
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 #define CHECK_CALL(FN)                                                 \
     {                                                                  \
         VkResult vkres = FN;                                           \
@@ -275,6 +279,51 @@ int main(int argc, char** argv)
     }
 
     // *************************************************************************
+    // Present threads
+    // *************************************************************************
+    const uint32_t kNumPresentThreads = 16;
+
+    // Make these capturable by the threads
+    bool                terminate  = false;
+    uint32_t            imageIndex = 0;
+    std::atomic_int32_t presentId  = -1;
+   
+    // Thread function
+    auto ThreadFn = [&renderer, &terminate, &imageIndex, &presentId](int32_t id) {
+        int32_t myId = id;
+        while (!terminate)
+        {
+            if (terminate)
+            {
+                break;
+            }
+
+            if (myId != presentId)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(1));
+                continue;
+            }
+
+            if (!SwapchainPresent(renderer.get(), imageIndex))
+            {
+                assert(false && "SwapchainPresent failed");
+                break;
+            }
+
+            GREX_LOG_INFO("Presented from: " << myId);
+
+            presentId = -1;
+        }
+    };
+   
+    // Create kNumPresentThreads to handle presentation when kicked off from main thread
+    std::vector<std::unique_ptr<std::thread>> presentThreads;
+    for (uint32_t i = 0; i < kNumPresentThreads; ++i) {
+        auto thread = std::unique_ptr<std::thread>(new std::thread(ThreadFn, i));
+        presentThreads.push_back(std::move(thread));
+    }
+
+    // *************************************************************************
     // Main loop
     // *************************************************************************
     VkClearValue clearValues[2];
@@ -285,7 +334,9 @@ int main(int argc, char** argv)
 
     while (window->PollEvents())
     {
-        uint32_t imageIndex = 0;
+        // Wait for SwapchainPresent to be called
+        while (presentId != -1);
+
         if (AcquireNextImage(renderer.get(), &imageIndex))
         {
             assert(false && "AcquireNextImage failed");
@@ -364,11 +415,13 @@ int main(int argc, char** argv)
             assert(false && "WaitForGpu failed");
         }
 
-        if (!SwapchainPresent(renderer.get(), imageIndex))
-        {
-            assert(false && "SwapchainPresent failed");
-            break;
-        }
+        // Kick of presentation
+        presentId = static_cast<int32_t>(rand() % kNumPresentThreads);
+    }
+
+    terminate = true;
+    for (auto& thread : presentThreads) {
+        thread->join();
     }
 
     return 0;
