@@ -52,12 +52,12 @@ enum MouseButton
 class GrexWindow
 {
 private:
-    GrexWindow(uint32_t width, uint32_t height, const char* pTitle);
+    GrexWindow(uint32_t width, uint32_t height, const char* pTitle, int flags = 0);
 
 public:
     ~GrexWindow();
 
-    static std::unique_ptr<GrexWindow> Create(uint32_t width, uint32_t height, const char* pTitle);
+    static std::unique_ptr<GrexWindow> Create(uint32_t width, uint32_t height, const char* pTitle, int flags = 0);
 
     uint32_t    GetWidth() const { return mWidth; }
     uint32_t    GetHeight() const { return mHeight; }
@@ -88,6 +88,8 @@ public:
     void AddKeyUpCallbacks(std::function<void(int)> fn);
 
     bool IsKeyDown(int key);
+
+    void UpdateSize(uint32_t width, uint32_t height);
 
 #if defined(ENABLE_IMGUI_D3D12)
     bool InitImGuiForD3D12(DxRenderer* pRenderer);

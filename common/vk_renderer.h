@@ -128,12 +128,13 @@ struct VulkanDescriptorSet
 };
 
 bool     InitVulkan(VulkanRenderer* pRenderer, bool enableDebug, const VulkanFeatures& features, uint32_t apiVersion = VK_API_VERSION_1_3);
-bool     InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t width, uint32_t height, uint32_t imageCount = 2);
+bool     InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t width, uint32_t height, uint32_t imageCount = 2, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
+void     DestroySwapchain(VulkanRenderer* pRenderer);
 bool     WaitForGpu(VulkanRenderer* pRenderer);
 bool     WaitForFence(VulkanRenderer* pRenderer, VkFence fence);
 VkResult GetSwapchainImages(VulkanRenderer* pRenderer, std::vector<VkImage>& images);
 VkResult AcquireNextImage(VulkanRenderer* pRenderer, uint32_t* pImageIndex);
-bool     SwapchainPresent(VulkanRenderer* pRenderer, uint32_t imageIndex);
+VkResult SwapchainPresent(VulkanRenderer* pRenderer, uint32_t imageIndex);
 
 VkFormat    ToVkFormat(GREXFormat format);
 VkIndexType ToVkIndexType(GREXFormat format);
@@ -331,7 +332,7 @@ VkResult CreateImageView(
     uint32_t           numArrayLayers,
     VkImageView*       pImageView);
 
-VkResult CreateDSV(
+VkResult CreateDepthStencilImage(
     VulkanRenderer* pRenderer,
     uint32_t        width,
     uint32_t        height,
@@ -346,6 +347,7 @@ VkResult CreateRenderPass(
     VulkanRenderPass*                        pRenderPass);
 
 void DestroyBuffer(VulkanRenderer* pRenderer, VulkanBuffer* pBuffer);
+void DestroyImage(VulkanRenderer* pRenderer, VulkanImage* pImage);
 
 VkDeviceAddress GetDeviceAddress(VulkanRenderer* pRenderer, const VulkanBuffer* pBuffer);
 VkDeviceAddress GetDeviceAddress(VulkanRenderer* pRenderer, VkAccelerationStructureKHR accelStruct);

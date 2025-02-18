@@ -12,6 +12,7 @@ using namespace glm;
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 #define CHECK_CALL(FN)                                                 \
@@ -69,11 +70,17 @@ void main()
 // =============================================================================
 // Globals
 // =============================================================================
-static uint32_t    gWindowWidth                = 1280;
-static uint32_t    gWindowHeight               = 720;
-static bool        gEnableDebug                = false;
-static bool        gPresentFromMultipleThreads = true;
-static GLFWwindow* gWindow                     = nullptr;
+static std::unique_ptr<VulkanRenderer> gRenderer                   = nullptr;
+static uint32_t                        gWindowWidth                = 1280;
+static uint32_t                        gWindowHeight               = 720;
+static bool                            gEnableDebug                = false;
+static bool                            gPresentFromMultipleThreads = true;
+static std::unique_ptr<GrexWindow>     gGrexWindow                 = nullptr;
+static VkSurfaceKHR                    gSurface                    = VK_NULL_HANDLE;
+static std::vector<VulkanImage>        gDepthImages                = {};
+static std::vector<VkImageView>        gSwapchainImageViews        = {};
+static std::vector<VkImageView>        gSwapchainDepthViews        = {};
+static std::mutex                      gResizeMutex;
 
 void CreatePipelineLayout(VulkanRenderer* pRenderer, VkPipelineLayout* pLayout);
 void CreateShaderModules(
@@ -88,6 +95,11 @@ void CreateGeometryBuffers(
     VulkanBuffer*   ppPositionBuffer,
     VulkanBuffer*   ppVertexColorBuffer);
 
+void DestroySwapchainDepthImages();
+void DestroySwapchainImageViews();
+void CreateSwapchainDepthImages();
+void CreateSwapchainImageViews();
+
 // =============================================================================
 // Window events
 // =============================================================================
@@ -101,8 +113,39 @@ void KeyDownEvent(int key)
     if (key == GLFW_KEY_T)
     {
         gPresentFromMultipleThreads = !gPresentFromMultipleThreads;
-        glfwSetWindowTitle(gWindow, GetDecoratedWindowTitle(gPresentFromMultipleThreads));
+        glfwSetWindowTitle(gGrexWindow->GetWindow(), GetDecoratedWindowTitle(gPresentFromMultipleThreads));
     }
+}
+
+void ResizeEvent(int width, int height)
+{
+    std::lock_guard<std::mutex> lock(gResizeMutex);
+
+    gWindowWidth  = static_cast<uint32_t>(width);
+    gWindowHeight = static_cast<uint32_t>(height);
+
+    gGrexWindow->UpdateSize(gWindowWidth, gWindowHeight);
+
+    DestroySwapchainImageViews();
+    DestroySwapchainDepthImages();
+
+    // DestroySwapchain(gRenderer.get());
+    auto oldSwapchainHandle = gRenderer->Swapchain;
+    gRenderer->Swapchain    = VK_NULL_HANDLE;
+
+    if ((gGrexWindow->GetWidth() > 0) && (gGrexWindow->GetHeight() > 0))
+    {
+        if (!InitSwapchain(gRenderer.get(), gSurface, gGrexWindow->GetWidth(), gGrexWindow->GetHeight(), 3, oldSwapchainHandle))
+        {
+            assert(false && "InitSwapchain failed");
+            abort();
+        }
+
+        CreateSwapchainDepthImages();
+        CreateSwapchainImageViews();
+    }
+
+    vkDestroySwapchainKHR(gRenderer->Device, oldSwapchainHandle, nullptr);
 }
 
 // =============================================================================
@@ -110,10 +153,10 @@ void KeyDownEvent(int key)
 // =============================================================================
 int main(int argc, char** argv)
 {
-    std::unique_ptr<VulkanRenderer> renderer = std::make_unique<VulkanRenderer>();
+    gRenderer = std::make_unique<VulkanRenderer>();
 
     VulkanFeatures features = {};
-    if (!InitVulkan(renderer.get(), gEnableDebug, features))
+    if (!InitVulkan(gRenderer.get(), gEnableDebug, features))
     {
         return EXIT_FAILURE;
     }
@@ -156,7 +199,7 @@ int main(int argc, char** argv)
     //
     // *************************************************************************
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    CreatePipelineLayout(renderer.get(), &pipelineLayout);
+    CreatePipelineLayout(gRenderer.get(), &pipelineLayout);
 
     // *************************************************************************
     // Shader module
@@ -164,7 +207,7 @@ int main(int argc, char** argv)
     VkShaderModule moduleVS = VK_NULL_HANDLE;
     VkShaderModule moduleFS = VK_NULL_HANDLE;
     CreateShaderModules(
-        renderer.get(),
+        gRenderer.get(),
         spirvVS,
         spirvFS,
         &moduleVS,
@@ -180,7 +223,7 @@ int main(int argc, char** argv)
     // *************************************************************************
     VkPipeline pipeline = VK_NULL_HANDLE;
     CreateDrawVertexColorPipeline(
-        renderer.get(),
+        gRenderer.get(),
         pipelineLayout,
         moduleVS,
         moduleFS,
@@ -195,7 +238,7 @@ int main(int argc, char** argv)
     {
         VkPhysicalDeviceProperties2 properties = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
         properties.pNext                       = &descriptorBufferProperties;
-        vkGetPhysicalDeviceProperties2(renderer->PhysicalDevice, &properties);
+        vkGetPhysicalDeviceProperties2(gRenderer->PhysicalDevice, &properties);
     }
 
     // *************************************************************************
@@ -204,100 +247,42 @@ int main(int argc, char** argv)
     VulkanBuffer indexBuffer;
     VulkanBuffer positionBuffer;
     VulkanBuffer vertexColorBuffer;
-    CreateGeometryBuffers(renderer.get(), &indexBuffer, &positionBuffer, &vertexColorBuffer);
+    CreateGeometryBuffers(gRenderer.get(), &indexBuffer, &positionBuffer, &vertexColorBuffer);
 
     // *************************************************************************
     // Window
     // *************************************************************************
-    auto window = GrexWindow::Create(gWindowWidth, gWindowHeight, GetDecoratedWindowTitle(gPresentFromMultipleThreads));
-    if (!window)
+    gGrexWindow = GrexWindow::Create(gWindowWidth, gWindowHeight, GetDecoratedWindowTitle(gPresentFromMultipleThreads), GLFW_RESIZABLE);
+    if (!gGrexWindow)
     {
         assert(false && "GrexWindow::Create failed");
         return EXIT_FAILURE;
     }
 
-    gWindow = window->GetWindow();
-    window->AddKeyDownCallbacks(KeyDownEvent);
+    gGrexWindow->AddKeyDownCallbacks(KeyDownEvent);
+    gGrexWindow->AddWindowResizeCallbacks(ResizeEvent);
 
     // *************************************************************************
-    // Swapchain
+    // Surface
     // *************************************************************************
-    auto surface = window->CreateVkSurface(renderer->Instance);
-    if (!surface)
+    gSurface = gGrexWindow->CreateVkSurface(gRenderer->Instance);
+    if (!gSurface)
     {
         assert(false && "CreateVkSurface failed");
         return EXIT_FAILURE;
     }
 
-    if (!InitSwapchain(renderer.get(), surface, window->GetWidth(), window->GetHeight()))
-    {
-        assert(false && "InitSwapchain failed");
-        return EXIT_FAILURE;
-    }
-
     // *************************************************************************
-    // Swapchain image views, depth buffers/views
+    // Swapchain
     // *************************************************************************
-    std::vector<VkImageView> imageViews;
-    std::vector<VkImageView> depthViews;
-    {
-        std::vector<VkImage> images;
-        CHECK_CALL(GetSwapchainImages(renderer.get(), images));
-
-        for (auto& image : images)
-        {
-            // Create swap chain images
-            VkImageViewCreateInfo createInfo           = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-            createInfo.image                           = image;
-            createInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-            createInfo.format                          = GREX_DEFAULT_RTV_FORMAT;
-            createInfo.components                      = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
-            createInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-            createInfo.subresourceRange.baseMipLevel   = 0;
-            createInfo.subresourceRange.levelCount     = 1;
-            createInfo.subresourceRange.baseArrayLayer = 0;
-            createInfo.subresourceRange.layerCount     = 1;
-
-            VkImageView imageView = VK_NULL_HANDLE;
-            CHECK_CALL(vkCreateImageView(renderer->Device, &createInfo, nullptr, &imageView));
-
-            imageViews.push_back(imageView);
-        }
-
-        size_t imageCount = images.size();
-
-        std::vector<VulkanImage> depthImages;
-        depthImages.resize(images.size());
-
-        for (int depthIndex = 0; depthIndex < imageCount; depthIndex++)
-        {
-            // Create depth images
-            CHECK_CALL(CreateDSV(renderer.get(), window->GetWidth(), window->GetHeight(), &depthImages[depthIndex]));
-
-            VkImageViewCreateInfo createInfo           = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-            createInfo.image                           = depthImages[depthIndex].Image;
-            createInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-            createInfo.format                          = GREX_DEFAULT_DSV_FORMAT;
-            createInfo.components                      = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-            createInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
-            createInfo.subresourceRange.baseMipLevel   = 0;
-            createInfo.subresourceRange.levelCount     = 1;
-            createInfo.subresourceRange.baseArrayLayer = 0;
-            createInfo.subresourceRange.layerCount     = 1;
-
-            VkImageView depthView = VK_NULL_HANDLE;
-            CHECK_CALL(vkCreateImageView(renderer->Device, &createInfo, nullptr, &depthView));
-
-            depthViews.push_back(depthView);
-        }
-    }
+    ResizeEvent(gWindowWidth, gWindowHeight);
 
     // *************************************************************************
     // Command buffer
     // *************************************************************************
     CommandObjects cmdBuf = {};
     {
-        CHECK_CALL(CreateCommandBuffer(renderer.get(), 0, &cmdBuf));
+        CHECK_CALL(CreateCommandBuffer(gRenderer.get(), 0, &cmdBuf));
     }
 
     // *************************************************************************
@@ -311,7 +296,8 @@ int main(int argc, char** argv)
     std::atomic_int32_t presentId  = -1;
 
     // Thread function
-    auto ThreadFn = [&renderer, &terminate, &imageIndex, &presentId](int32_t id) {
+    auto pRenderer = gRenderer.get();
+    auto ThreadFn  = [pRenderer, &terminate, &imageIndex, &presentId](int32_t id) {
         int32_t myId = id;
         while (!terminate)
         {
@@ -326,13 +312,13 @@ int main(int argc, char** argv)
                 continue;
             }
 
-            if (!SwapchainPresent(renderer.get(), imageIndex))
+            auto vkres = SwapchainPresent(pRenderer, imageIndex);
+            if ((vkres == VK_SUBOPTIMAL_KHR) || (vkres == VK_ERROR_SURFACE_LOST_KHR) || (vkres == VK_ERROR_OUT_OF_DATE_KHR))
             {
-                assert(false && "SwapchainPresent failed");
-                break;
+                ResizeEvent(gGrexWindow->GetWidth(), gGrexWindow->GetHeight());
             }
 
-            //GREX_LOG_INFO("Presented from: " << myId);
+            // GREX_LOG_INFO("Presented from: " << myId);
 
             presentId = -1;
         }
@@ -355,13 +341,18 @@ int main(int argc, char** argv)
     };
     clearValues[1].depthStencil = {1.0f, 0};
 
-    while (window->PollEvents())
+    while (gGrexWindow->PollEvents())
     {
         // Wait for SwapchainPresent to be called
         while (presentId != -1)
             ;
 
-        if (AcquireNextImage(renderer.get(), &imageIndex))
+        if (gRenderer->Swapchain == VK_NULL_HANDLE)
+        {
+            continue;
+        }
+
+        if (AcquireNextImage(gRenderer.get(), &imageIndex))
         {
             assert(false && "AcquireNextImage failed");
             break;
@@ -374,14 +365,14 @@ int main(int argc, char** argv)
 
         {
             VkRenderingAttachmentInfo colorAttachment = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-            colorAttachment.imageView                 = imageViews[imageIndex];
+            colorAttachment.imageView                 = gSwapchainImageViews[imageIndex];
             colorAttachment.imageLayout               = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
             colorAttachment.loadOp                    = VK_ATTACHMENT_LOAD_OP_CLEAR;
             colorAttachment.storeOp                   = VK_ATTACHMENT_STORE_OP_STORE;
             colorAttachment.clearValue                = clearValues[0];
 
             VkRenderingAttachmentInfo depthAttachment = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-            depthAttachment.imageView                 = depthViews[imageIndex];
+            depthAttachment.imageView                 = gSwapchainDepthViews[imageIndex];
             depthAttachment.imageLayout               = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             depthAttachment.loadOp                    = VK_ATTACHMENT_LOAD_OP_CLEAR;
             depthAttachment.storeOp                   = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -431,10 +422,10 @@ int main(int argc, char** argv)
         CHECK_CALL(vkEndCommandBuffer(cmdBuf.CommandBuffer));
 
         // Execute command buffer
-        CHECK_CALL(ExecuteCommandBuffer(renderer.get(), &cmdBuf));
+        CHECK_CALL(ExecuteCommandBuffer(gRenderer.get(), &cmdBuf));
 
         // Wait for the GPU to finish the work
-        if (!WaitForGpu(renderer.get()))
+        if (!WaitForGpu(gRenderer.get()))
         {
             assert(false && "WaitForGpu failed");
         }
@@ -446,11 +437,11 @@ int main(int argc, char** argv)
         }
         else
         {
-            presentId = -1;
-            if (!SwapchainPresent(renderer.get(), imageIndex))
+            presentId  = -1;
+            auto vkres = SwapchainPresent(gRenderer.get(), imageIndex);
+            if ((vkres == VK_SUBOPTIMAL_KHR) || (vkres == VK_ERROR_SURFACE_LOST_KHR) || (vkres == VK_ERROR_OUT_OF_DATE_KHR))
             {
-                assert(false && "SwapchainPresent failed");
-                break;
+                ResizeEvent(gGrexWindow->GetWidth(), gGrexWindow->GetHeight());
             }
         }
     }
@@ -537,6 +528,98 @@ void CreateGeometryBuffers(
         pVertexColorBuffer));
 }
 
-void CreateFrameBuffers()
+void DestroySwapchainDepthImages()
 {
+    vkDeviceWaitIdle(gRenderer->Device);
+
+    for (auto& image : gDepthImages)
+    {
+        DestroyImage(gRenderer.get(), &image);
+    }
+    gDepthImages.clear();
+}
+
+void DestroySwapchainImageViews()
+{
+    vkDeviceWaitIdle(gRenderer->Device);
+
+    // Destroy swapchain depth views
+    for (auto& view : gSwapchainImageViews)
+    {
+        vkDestroyImageView(gRenderer->Device, view, nullptr);
+    }
+    gSwapchainImageViews.clear();
+
+    // Destroy swapchain depth views
+    for (auto& view : gSwapchainDepthViews)
+    {
+        vkDestroyImageView(gRenderer->Device, view, nullptr);
+    }
+    gSwapchainDepthViews.clear();
+}
+
+void CreateSwapchainDepthImages()
+{
+    // Get swapchain images
+    std::vector<VkImage> images;
+    CHECK_CALL(GetSwapchainImages(gRenderer.get(), images));
+
+    // Allocate storage for swapchain depth images
+    size_t imageCount = images.size();
+    gDepthImages.resize(imageCount);
+
+    // Create depth images
+    for (int depthIndex = 0; depthIndex < imageCount; depthIndex++)
+    {
+        CHECK_CALL(CreateDepthStencilImage(gRenderer.get(), gGrexWindow->GetWidth(), gGrexWindow->GetHeight(), &gDepthImages[depthIndex]));
+    }
+}
+
+void CreateSwapchainImageViews()
+{
+    // Get swapchain images
+    std::vector<VkImage> images;
+    CHECK_CALL(GetSwapchainImages(gRenderer.get(), images));
+
+    // Create image views
+    for (auto& image : images)
+    {
+        // Create swap chain imageview
+        VkImageViewCreateInfo createInfo           = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        createInfo.image                           = image;
+        createInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        createInfo.format                          = GREX_DEFAULT_RTV_FORMAT;
+        createInfo.components                      = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+        createInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        createInfo.subresourceRange.baseMipLevel   = 0;
+        createInfo.subresourceRange.levelCount     = 1;
+        createInfo.subresourceRange.baseArrayLayer = 0;
+        createInfo.subresourceRange.layerCount     = 1;
+
+        VkImageView imageView = VK_NULL_HANDLE;
+        CHECK_CALL(vkCreateImageView(gRenderer->Device, &createInfo, nullptr, &imageView));
+
+        gSwapchainImageViews.push_back(imageView);
+    }
+
+    // Create depth image views
+    size_t imageCount = images.size();
+    for (int depthIndex = 0; depthIndex < imageCount; depthIndex++)
+    {
+        VkImageViewCreateInfo createInfo           = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        createInfo.image                           = gDepthImages[depthIndex].Image;
+        createInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        createInfo.format                          = GREX_DEFAULT_DSV_FORMAT;
+        createInfo.components                      = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+        createInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+        createInfo.subresourceRange.baseMipLevel   = 0;
+        createInfo.subresourceRange.levelCount     = 1;
+        createInfo.subresourceRange.baseArrayLayer = 0;
+        createInfo.subresourceRange.layerCount     = 1;
+
+        VkImageView depthView = VK_NULL_HANDLE;
+        CHECK_CALL(vkCreateImageView(gRenderer->Device, &createInfo, nullptr, &depthView));
+
+        gSwapchainDepthViews.push_back(depthView);
+    }
 }

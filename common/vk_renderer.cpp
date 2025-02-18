@@ -429,7 +429,7 @@ bool InitVulkan(VulkanRenderer* pRenderer, bool enableDebug, const VulkanFeature
     return true;
 }
 
-bool InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t width, uint32_t height, uint32_t imageCount)
+bool InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t width, uint32_t height, uint32_t imageCount, VkSwapchainKHR oldSwapchain)
 {
     assert(surface != VK_NULL_HANDLE);
 
@@ -472,7 +472,7 @@ bool InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t wid
         vkci.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         vkci.presentMode           = VK_PRESENT_MODE_FIFO_KHR;
         vkci.clipped               = VK_FALSE;
-        vkci.oldSwapchain          = VK_NULL_HANDLE;
+        vkci.oldSwapchain          = oldSwapchain;
 
         VkResult vkres = vkCreateSwapchainKHR(pRenderer->Device, &vkci, nullptr, &pRenderer->Swapchain);
         if (vkres != VK_SUCCESS)
@@ -507,6 +507,7 @@ bool InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t wid
     }
 
     // Semaphores
+    if (pRenderer->ImageReadySemaphore == VK_NULL_HANDLE)
     {
         VkSemaphoreCreateInfo vkci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkci.pNext                 = nullptr;
@@ -528,6 +529,7 @@ bool InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t wid
     }
 
     // Fence
+    if (pRenderer->ImageReadyFence == VK_NULL_HANDLE)
     {
         VkFenceCreateInfo vkci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         vkci.pNext             = nullptr;
@@ -542,6 +544,20 @@ bool InitSwapchain(VulkanRenderer* pRenderer, VkSurfaceKHR surface, uint32_t wid
     }
 
     return true;
+}
+
+void DestroySwapchain(VulkanRenderer* pRenderer)
+{
+    auto vkres = vkDeviceWaitIdle(pRenderer->Device);
+    if (vkres != VK_SUCCESS)
+    {
+        assert(false && "vkDeviceWaitIdle failed");
+    }
+
+    if (pRenderer->Swapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(pRenderer->Device, pRenderer->Swapchain, nullptr);
+        pRenderer->Swapchain = VK_NULL_HANDLE;
+    }
 }
 
 bool WaitForGpu(VulkanRenderer* pRenderer)
@@ -620,7 +636,7 @@ VkResult AcquireNextImage(VulkanRenderer* pRenderer, uint32_t* pImageIndex)
     return VK_SUCCESS;
 }
 
-bool SwapchainPresent(VulkanRenderer* pRenderer, uint32_t imageIndex)
+VkResult SwapchainPresent(VulkanRenderer* pRenderer, uint32_t imageIndex)
 {
     VkPresentInfoKHR presentInfo   = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     presentInfo.pNext              = nullptr;
@@ -632,13 +648,7 @@ bool SwapchainPresent(VulkanRenderer* pRenderer, uint32_t imageIndex)
     presentInfo.pResults           = nullptr;
 
     VkResult vkres = vkQueuePresentKHR(pRenderer->Queue, &presentInfo);
-    if (vkres != VK_SUCCESS)
-    {
-        assert(false && "vkQueuePresentKHR failed");
-        return false;
-    }
-
-    return true;
+    return vkres;
 }
 
 VkFormat ToVkFormat(GREXFormat format)
@@ -1742,7 +1752,7 @@ VkResult CreateImageView(
     return vkres;
 }
 
-VkResult CreateDSV(
+VkResult CreateDepthStencilImage(
     VulkanRenderer* pRenderer,
     uint32_t        width,
     uint32_t        height,
@@ -1923,6 +1933,12 @@ void DestroyBuffer(VulkanRenderer* pRenderer, VulkanBuffer* pBuffer)
 {
     vmaDestroyBuffer(pRenderer->Allocator, pBuffer->Buffer, pBuffer->Allocation);
     *pBuffer = {};
+}
+
+void DestroyImage(VulkanRenderer* pRenderer, VulkanImage* pImage)
+{
+    vmaDestroyImage(pRenderer->Allocator, pImage->Image, pImage->Allocation);
+    *pImage = {};
 }
 
 VkDeviceAddress GetDeviceAddress(VulkanRenderer* pRenderer, const VulkanBuffer* pBuffer)

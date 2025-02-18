@@ -200,7 +200,7 @@ std::unordered_map<GLFWwindow*, GrexWindow*> WindowEvents::sWindows;
 // =============================================================================
 // Window
 // =============================================================================
-GrexWindow::GrexWindow(uint32_t width, uint32_t height, const char* pTitle)
+GrexWindow::GrexWindow(uint32_t width, uint32_t height, const char* pTitle, int flags)
     : mWidth(width),
       mHeight(height)
 {
@@ -211,7 +211,9 @@ GrexWindow::GrexWindow(uint32_t width, uint32_t height, const char* pTitle)
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    
+    int resizeable = (flags & GLFW_RESIZABLE) ? GLFW_TRUE : GLFW_FALSE;
+    glfwWindowHint(GLFW_RESIZABLE, resizeable);
 
     mWindow = glfwCreateWindow(static_cast<int>(mWidth), static_cast<int>(mHeight), pTitle, nullptr, nullptr);
     if (!mWindow)
@@ -272,9 +274,9 @@ GrexWindow::~GrexWindow()
     glfwTerminate();
 }
 
-std::unique_ptr<GrexWindow> GrexWindow::Create(uint32_t width, uint32_t height, const char* pTitle)
+std::unique_ptr<GrexWindow> GrexWindow::Create(uint32_t width, uint32_t height, const char* pTitle, int flags)
 {
-    GrexWindow* pWindow = new GrexWindow(width, height, pTitle);
+    GrexWindow* pWindow = new GrexWindow(width, height, pTitle, flags);
     if (IsNull(pWindow))
     {
         return nullptr;
@@ -455,6 +457,12 @@ bool GrexWindow::IsKeyDown(int key)
         return mKeyDownState[keyIndex];
     }
     return false;
+}
+
+void GrexWindow::UpdateSize(uint32_t width, uint32_t height)
+{
+    mWidth = width;
+    mHeight = height;
 }
 
 #if defined(ENABLE_IMGUI_D3D12)
